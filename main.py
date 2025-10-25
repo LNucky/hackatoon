@@ -354,4 +354,4 @@ async def optimize_with_chain(req: ChainOptimizeRequest):
     return build_route_with_chain(req.points, req.legs_sec, req.start_time)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
