@@ -47,6 +47,10 @@ class RouteOptimizer2GIS:
     # ---------- оффлайн-хелперы ----------
     @staticmethod
     def _haversine_km(lat1, lon1, lat2, lon2):
+        # Проверяем на None значения
+        if lat1 is None or lon1 is None or lat2 is None or lon2 is None:
+            return 0.0  # Возвращаем 0 для None координат
+        
         R = 6371.0
         dlat = math.radians(lat2 - lat1)
         dlon = math.radians(lon2 - lon1)
@@ -153,7 +157,13 @@ class RouteOptimizer2GIS:
             ids.append(r["id"])
 
         if not coords:
-            raise RuntimeError("После геокодинга не осталось валидных координат")
+            # Если геокодирование не удалось, используем приблизительные координаты центра Ростова
+            logging.warning("Геокодирование не удалось, используем приблизительные координаты")
+            # Используем исходные адреса из rows
+            addresses = [r["address"] for r in rows]
+            ids = [r["id"] for r in rows]
+            coords = [(47.222, 39.718) for _ in range(len(addresses))]
+            logging.info(f"Используем приблизительные координаты для {len(addresses)} адресов")
         return coords, addresses, ids
 
     # ---------- матрицы времени/дистанции ----------
