@@ -95,7 +95,7 @@ class RouteOptimizer2GIS:
         with open(csv_path, "r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             for r in reader:
-                address = (r.get("Адрес объекта") or r.get("Адрес") or "").strip()
+                address = (r.get("Адрес объекта") or r.get("Адрес") or r.get("Адрес объекта") or "").strip()
                 if not address:
                     # пустой адрес — пропустим
                     continue
