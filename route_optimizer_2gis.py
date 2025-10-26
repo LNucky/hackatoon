@@ -94,13 +94,29 @@ class RouteOptimizer2GIS:
         rows = []
         with open(csv_path, "r", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
+            
+            # Находим колонки по ключевым словам (игнорируя пробелы и регистр)
+            address_col = None
+            id_col = None
+            
+            for col_name in reader.fieldnames:
+                col_lower = col_name.lower().replace(' ', '').replace('\t', '')
+                if 'адрес' in col_lower or 'address' in col_lower:
+                    address_col = col_name
+                elif 'номер' in col_lower or 'id' in col_lower or 'объект' in col_lower:
+                    id_col = col_name
+            
+            
             for r in reader:
-                address = (r.get("Адрес объекта") or r.get("Адрес") or r.get("Адрес объекта") or "").strip()
+                address = r.get(address_col, "").strip() if address_col else ""
                 if not address:
                     # пустой адрес — пропустим
                     continue
+                    
+                obj_id = r.get(id_col, "").strip() if id_col else str(len(rows)+1)
+                
                 rows.append({
-                    "id":           r.get("Номер объекта") or r.get("Номер Объекта") or r.get("ID") or str(len(rows)+1),
+                    "id":           obj_id,
                     "address":      address,
                     # координаты из CSV игнорируем: lat=None, lon=None
                     "lat":          None,
