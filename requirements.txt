@@ -4,3 +4,5 @@ pandas
 openpyxl
 python-multipart
 httpx
+requests
+pydantic

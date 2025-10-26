@@ -9,8 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openpyxl import load_workbook
 
+# Импорт нового модуля оптимизации маршрута
+from route_optimizer_2gis import RouteOptimizer2GIS
+
 # ───────── CONFIG
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "58c38b72-57f7-4946-bc13-a256d341281a").strip()
+DGIS_API_KEY = os.getenv("DGIS_API_KEY", "09e6cea9-9540-4665-934e-1864124b7304").strip()
 GEOCODE_CACHE_PATH = os.getenv("GEOCODE_CACHE_PATH", "./geocode_cache.json")
 GEOCODE_SLEEP_SEC = float(os.getenv("GEOCODE_SLEEP_SEC", "0.15"))
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "10"))
@@ -287,6 +291,36 @@ def build_route_with_chain(points: List[Point], legs_sec: List[float], start_tim
 def health():
     return {"status": "ok"}
 
+@app.post("/api/validate_dgis_key")
+async def validate_dgis_key(dgis_api_key: str = Query(..., description="Ключ API 2ГИС для проверки")):
+    """
+    Проверяет валидность ключа API 2ГИС.
+    """
+    try:
+        # Валидация формата ключа
+        if not dgis_api_key or not dgis_api_key.strip():
+            return {"valid": False, "error": "Ключ API не может быть пустым"}
+        
+        import re
+        key_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        if not re.match(key_pattern, dgis_api_key.strip(), re.IGNORECASE):
+            return {"valid": False, "error": "Неверный формат ключа API. Ожидается UUID формат"}
+        
+        # Проверяем ключ через создание клиента и тестовый запрос
+        from dgis_matrix_client import DGISMatrixClient, DGISMatrixError
+        
+        try:
+            client = DGISMatrixClient(dgis_api_key.strip())
+            client.warmup()  # Тестовый запрос
+            return {"valid": True, "message": "Ключ API валиден"}
+        except DGISMatrixError as e:
+            return {"valid": False, "error": f"Ошибка API 2ГИС: {str(e)}"}
+        except Exception as e:
+            return {"valid": False, "error": f"Неожиданная ошибка: {str(e)}"}
+            
+    except Exception as e:
+        return {"valid": False, "error": f"Ошибка валидации: {str(e)}"}
+
 @app.post("/api/optimize")
 async def optimize(
     file: UploadFile = File(...),
@@ -352,6 +386,111 @@ async def optimize_with_chain(req: ChainOptimizeRequest):
     if not req.points or not req.legs_sec:
         raise HTTPException(status_code=400, detail="Нужны points и legs_sec.")
     return build_route_with_chain(req.points, req.legs_sec, req.start_time)
+
+@app.post("/api/optimize_2gis")
+async def optimize_2gis(
+    file: UploadFile = File(...),
+    dgis_api_key: str = Query(..., description="Ключ API 2ГИС"),
+    work_start: str = Query(default="09:00", description="Время начала работы (HH:MM)"),
+    work_end: str = Query(default="18:00", description="Время окончания работы (HH:MM)"),
+    meeting_minutes: int = Query(default=30, ge=5, le=240, description="Длительность визита в минутах")
+):
+    """
+    Новый endpoint для оптимизации маршрута с использованием 2ГИС API.
+    Использует реальные данные о пробках и более точное геокодирование.
+    """
+    try:
+        # Сохраняем загруженный файл во временный файл
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.csv') as tmp_file:
+            content = await file.read()
+            tmp_file.write(content)
+            tmp_file_path = tmp_file.name
+        
+        try:
+            # Валидация ключа API
+            if not dgis_api_key or not dgis_api_key.strip():
+                raise HTTPException(status_code=400, detail="Ключ API 2ГИС не может быть пустым")
+            
+            # Базовая валидация формата ключа (UUID формат)
+            import re
+            key_pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            if not re.match(key_pattern, dgis_api_key.strip(), re.IGNORECASE):
+                raise HTTPException(status_code=400, detail="Неверный формат ключа API 2ГИС. Ожидается UUID формат")
+            
+            # Создаем оптимизатор с переданным ключом 2ГИС
+            optimizer = RouteOptimizer2GIS(dgis_api_key.strip())
+            
+            # Запускаем оптимизацию
+            result = optimizer.optimize_from_csv(
+                csv_path=tmp_file_path,
+                work_start_str=work_start,
+                work_end_str=work_end,
+                meeting_minutes=meeting_minutes
+            )
+            
+            # Преобразуем результат в формат, совместимый с существующим API
+            converted_result = convert_2gis_result_to_api_format(result)
+            
+            return converted_result
+            
+        finally:
+            # Удаляем временный файл
+            try:
+                os.unlink(tmp_file_path)
+            except:
+                pass
+                
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка оптимизации маршрута: {str(e)}")
+
+def convert_2gis_result_to_api_format(result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Преобразует результат оптимизации 2ГИС в формат, совместимый с существующим API.
+    """
+    schedule = result.get("schedule", [])
+    
+    # Преобразуем расписание в формат API
+    route = []
+    for item in schedule:
+        route_item = {
+            "id": item.get("id"),
+            "client": f"Клиент {item.get('id')}",
+            "address": item.get("address", ""),
+            "lat": None,  # Координаты не возвращаются в текущем формате
+            "lon": None,
+            "window_start": None,  # Временные окна не возвращаются
+            "window_end": None,
+            "service_min": result.get("meeting_minutes", 30),
+            "eta": item.get("arrive"),
+            "late_minutes": 0  # Пока не вычисляется
+        }
+        route.append(route_item)
+    
+    # Создаем summary в формате API
+    stats = result.get("stats", {})
+    summary = {
+        "drive_min": int(stats.get("total_drive_min", 0)),
+        "service_min": len(schedule) * result.get("meeting_minutes", 30),
+        "wait_min": 0,  # Пока не вычисляется
+        "total_elapsed_min": int(stats.get("total_drive_min", 0)) + len(schedule) * result.get("meeting_minutes", 30),
+        "total_time_min": int(stats.get("total_drive_min", 0)),
+        "visits": len(schedule),
+        "on_time": len(schedule),  # Пока считаем все вовремя
+        "late": 0,
+        "late_penalty": 0
+    }
+    
+    return {
+        "summary": summary,
+        "route": route,
+        "external_provider": result.get("external_provider", "2GIS"),
+        "uses_external_api": result.get("uses_external_api", True),
+        "total_distance_km": stats.get("total_distance_km", 0),
+        "work_window": result.get("work_window", {}),
+        "visited_count": stats.get("visited_count", 0),
+        "dropped_count": stats.get("dropped_count", 0)
+    }
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
