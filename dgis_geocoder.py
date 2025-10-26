@@ -99,42 +99,58 @@ class DGISGeocoder:
 
     # ---------- public ----------
     def geocode_one(self, address: str) -> Optional[Tuple[float, float]]:
-        key = address.strip()
-        if not key:
+        """
+        Геокодирует один адрес -> (lat, lon) с кэшем.
+        ВАЖНО: ключ кэша включает city_hint/country_hint, чтобы не ловить старые
+        промахи из других городов. Возвращает только валидные float.
+        """
+        raw = (address or "").strip()
+        if not raw:
             return None
-        if key in self._cache:
-            ent = self._cache[key]
-            return (ent.get("lat"), ent.get("lon"))
+
+        # Новый ключ кэша: адрес + город + страна (избавляет от "битых" ранних записей)
+        cache_key = f"{raw} | {self.city_hint} | {self.country_hint}"
+
+        # чтение из кэша
+        ent = self._cache.get(cache_key)
+        if ent is not None:
+            lat = ent.get("lat"); lon = ent.get("lon")
+            try:
+                if lat is None or lon is None:
+                    return None
+                return float(lat), float(lon)  # (lat, lon)
+            except (TypeError, ValueError):
+                return None
 
         # 1) 2ГИС
         try:
-            res = self._geocode_2gis(key)
+            res = self._geocode_2gis(raw)
             if res:
-                lat, lon = res
-                self._cache[key] = {"lat": lat, "lon": lon, "src": "2gis"}
+                lat, lon = float(res[0]), float(res[1])  # гарантируем (lat, lon)
+                self._cache[cache_key] = {"lat": lat, "lon": lon, "src": "2gis"}
                 self._save_cache()
-                # вежливая пауза
-                time.sleep(0.15)
-                return res
+                time.sleep(0.15)  # вежливая пауза
+                return lat, lon
         except Exception as e:
             logging.warning("2ГИС geocode fail: %s", e)
 
-        # 2) Nominatim fallback
+        # 2) Nominatim (OSM)
         try:
-            res = self._geocode_nominatim(key)
+            res = self._geocode_osm(raw)
             if res:
-                lat, lon = res
-                self._cache[key] = {"lat": lat, "lon": lon, "src": "nominatim"}
+                lat, lon = float(res[0]), float(res[1])  # (lat, lon)
+                self._cache[cache_key] = {"lat": lat, "lon": lon, "src": "osm"}
                 self._save_cache()
-                time.sleep(1.0)  # Nominatim просит не спамить
-                return res
+                time.sleep(0.15)
+                return lat, lon
         except Exception as e:
             logging.warning("Nominatim geocode fail: %s", e)
 
         # не нашли
-        self._cache[key] = {"lat": None, "lon": None, "src": "none"}
+        self._cache[cache_key] = {"lat": None, "lon": None, "src": "none"}
         self._save_cache()
         return None
+
 
     def batch_geocode(self, addresses: List[str]) -> List[Optional[Tuple[float, float]]]:
         out: List[Optional[Tuple[float, float]]] = []
