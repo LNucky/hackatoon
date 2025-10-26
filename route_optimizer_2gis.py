@@ -47,10 +47,6 @@ class RouteOptimizer2GIS:
     # ---------- оффлайн-хелперы ----------
     @staticmethod
     def _haversine_km(lat1, lon1, lat2, lon2):
-        # Проверяем на None значения
-        if lat1 is None or lon1 is None or lat2 is None or lon2 is None:
-            return 0.0  # Возвращаем 0 для None координат
-        
         R = 6371.0
         dlat = math.radians(lat2 - lat1)
         dlon = math.radians(lon2 - lon1)
@@ -95,42 +91,74 @@ class RouteOptimizer2GIS:
 
     # ---------- чтение CSV (Только адреса! Координаты из CSV игнорируем) ----------
     def _read_csv(self, csv_path: str) -> Dict[str, Any]:
-        rows = []
-        with open(csv_path, "r", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            
-            # Находим колонки по ключевым словам (игнорируя пробелы и регистр)
-            address_col = None
-            id_col = None
-            
-            for col_name in reader.fieldnames:
-                col_lower = col_name.lower().replace(' ', '').replace('\t', '')
-                if 'адрес' in col_lower or 'address' in col_lower:
-                    address_col = col_name
-                elif 'номер' in col_lower or 'id' in col_lower or 'объект' in col_lower:
-                    id_col = col_name
-            
-            
-            for r in reader:
-                address = r.get(address_col, "").strip() if address_col else ""
-                if not address:
-                    # пустой адрес — пропустим
+        """
+        Робастный парсер CSV:
+        - autodetect delimiter (comma/semicolon/pipe/tab)
+        - поддержка заголовков: "Адрес объекта" / "Адрес" / "address" / "Address"
+        - фоллбэк кодировки: utf-8-sig -> cp1251 -> utf-8
+        """
+        def detect_settings(path: str):
+            encodings = ["utf-8-sig", "cp1251", "utf-8"]
+            for enc in encodings:
+                try:
+                    with open(path, "r", encoding=enc, errors="strict") as f:
+                        sample = f.read(4096)
+                    try:
+                        dialect = csv.Sniffer().sniff(sample, delimiters=",;|\t")
+                    except Exception:
+                        # простой эвристический фоллбэк
+                        if sample.count(";") > sample.count(","):
+                            dialect = csv.excel
+                            dialect.delimiter = ";"
+                        elif sample.count("\t") > 0:
+                            dialect = csv.excel_tab
+                        else:
+                            dialect = csv.excel  # запятая
+                    return enc, dialect
+                except UnicodeDecodeError:
                     continue
-                    
-                obj_id = r.get(id_col, "").strip() if id_col else str(len(rows)+1)
-                
+            # крайний фоллбэк
+            d = csv.excel; d.delimiter = ","
+            return "utf-8", d
+
+        enc, dialect = detect_settings(csv_path)
+
+        def first_nonempty(row: dict, keys) -> str:
+            for k in keys:
+                v = row.get(k)
+                if v is not None:
+                    s = str(v).strip()
+                    if s:
+                        return s
+            return ""
+
+        addr_keys = ["Адрес объекта", "Адрес", "address", "Address"]
+        id_keys   = ["Номер объекта", "Номер Объекта", "ID", "Id", "id", "№", "Номер"]
+        prio_keys = ["Уровень клиента", "Приоритет", "priority", "prio"]
+        ws_keys   = ["Время начала рабочего дня", "Начало окна", "Окно с", "Start", "Начало работы"]
+        we_keys   = ["Время окончания рабочего дня", "Конец окна", "Окно по", "End", "Окончание работы"]
+        ls_keys   = ["Время начала обеда", "Обед с", "Lunch from", "Lunch start"]
+        le_keys   = ["Время окончания обеда", "Обед по", "Lunch to", "Lunch end"]
+
+        rows = []
+        with open(csv_path, "r", encoding=enc, newline="") as f:
+            reader = csv.DictReader(f, dialect=dialect)
+            for r in reader:
+                address = first_nonempty(r, addr_keys)
+                if not address:
+                    continue
                 rows.append({
-                    "id":           obj_id,
-                    "address":      address,
-                    # координаты из CSV игнорируем: lat=None, lon=None
-                    "lat":          None,
-                    "lon":          None,
-                    "prio":         self._parse_priority(r.get("Уровень клиента")),
-                    "win_start":    (r.get("Время начала рабочего дня") or "09:00").strip(),
-                    "win_end":      (r.get("Время окончания рабочего дня") or "18:00").strip(),
-                    "lunch_start":  (r.get("Время начала обеда") or "13:00").strip(),
-                    "lunch_end":    (r.get("Время окончания обеда") or "14:00").strip(),
+                    "id":         first_nonempty(r, id_keys) or str(len(rows) + 1),
+                    "address":    address,
+                    "lat":        None,   # координаты из CSV игнорируем
+                    "lon":        None,
+                    "prio":       self._parse_priority(first_nonempty(r, prio_keys)),
+                    "win_start":  first_nonempty(r, ws_keys) or "09:00",
+                    "win_end":    first_nonempty(r, we_keys) or "18:00",
+                    "lunch_start":first_nonempty(r, ls_keys) or "13:00",
+                    "lunch_end":  first_nonempty(r, le_keys) or "14:00",
                 })
+
         if not rows:
             raise RuntimeError("CSV пустой или нет валидных адресов")
         return {"rows": rows}
@@ -157,13 +185,7 @@ class RouteOptimizer2GIS:
             ids.append(r["id"])
 
         if not coords:
-            # Если геокодирование не удалось, используем приблизительные координаты центра Ростова
-            logging.warning("Геокодирование не удалось, используем приблизительные координаты")
-            # Используем исходные адреса из rows
-            addresses = [r["address"] for r in rows]
-            ids = [r["id"] for r in rows]
-            coords = [(47.222, 39.718) for _ in range(len(addresses))]
-            logging.info(f"Используем приблизительные координаты для {len(addresses)} адресов")
+            raise RuntimeError("После геокодинга не осталось валидных координат")
         return coords, addresses, ids
 
     # ---------- матрицы времени/дистанции ----------
